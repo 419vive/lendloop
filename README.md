@@ -120,9 +120,20 @@ npx convex env set CLERK_JWT_ISSUER_DOMAIN https://<your-app>.clerk.accounts.dev
 npx convex env set ADMIN_EMAILS you@example.com
 ```
 
-`ADMIN_EMAILS` is matched against the **verified** email in the Clerk token on every sign-in.
-If you sign in with an address in that list and don't see the *Admin* tab, check that your
-session token includes the `email` claim (Clerk Dashboard → Sessions → Customize session token).
+4. Clerk's session token does not carry the user's name or email by default, and LendLoop
+   needs both (display name, admin check). Clerk Dashboard → **Sessions → Customize session
+   token**, set the claims to:
+
+   ```json
+   {
+     "aud": "convex",
+     "name": "{{user.full_name}}",
+     "email": "{{user.primary_email_address}}"
+   }
+   ```
+
+`ADMIN_EMAILS` is matched against that email on every sign-in (Clerk only issues tokens for
+verified primary addresses). Changes to the token apply within about a minute; reload the app.
 
 ### 4. Secrets for the n8n integration
 
