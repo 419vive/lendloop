@@ -1,0 +1,209 @@
+{
+  "id": "LLRequestNotify1",
+  "name": "LendLoop – Request notification",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "LLErrorHandler01"
+  },
+  "nodes": [
+    {
+      "id": "notify-webhook",
+      "name": "Convex webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "6f0d7a4e-3a52-4d55-9f31-1c1e5a0c7a11",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lendloop-request-event",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "notify-verify",
+      "name": "Verify HMAC signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const crypto = require('crypto');\nconst MAX_SKEW_SECONDS = 300;\nfunction requireSecret(name) {\n  const value = $env[name];\n  if (!value || value.length < 32) throw new Error(name + ' is missing or shorter than 32 chars');\n  return value;\n}\n// v1 = hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)) — same as convex/lib/hmac.ts\nfunction sign(secret, rawBody) {\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const hex = crypto.createHmac('sha256', secret).update(timestamp + '.' + rawBody).digest('hex');\n  return { timestamp, signature: 'v1=' + hex };\n}\nfunction verify(secret, rawBody, timestamp, signature) {\n  if (!timestamp || !signature) return 'missing_headers';\n  if (!/^\\d{1,12}$/.test(String(timestamp))) return 'bad_timestamp';\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > MAX_SKEW_SECONDS) return 'timestamp_skew';\n  if (!String(signature).startsWith('v1=')) return 'bad_signature_format';\n  const provided = Buffer.from(String(signature).slice(3), 'hex');\n  const expected = crypto.createHmac('sha256', secret).update(timestamp + '.' + rawBody).digest();\n  if (provided.length !== expected.length) return 'bad_signature_format';\n  return crypto.timingSafeEqual(provided, expected) ? null : 'signature_mismatch';\n}\n\nconst secret = requireSecret('CONVEX_TO_N8N_SECRET');\nconst item = $input.first();\nconst headers = item.json.headers || {};\nconst raw = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf8');\nconst problem = verify(secret, raw, headers['x-lendloop-timestamp'], headers['x-lendloop-signature']);\nif (problem) {\n  // Never log the body of an unauthenticated request.\n  console.warn('[lendloop] rejected webhook: ' + problem);\n  return [{ json: { valid: false, reason: problem } }];\n}\nreturn [{ json: { valid: true, payload: JSON.parse(raw) } }];\n"
+      }
+    },
+    {
+      "id": "notify-if",
+      "name": "Signature valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "valid-check",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "notify-build",
+      "name": "Build notification (dedupe by eventId)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        -100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Convex retries deliveries, so the same eventId can arrive twice.\n// Remember recent ids in workflow static data (persisted for active workflows).\nconst p = $input.first().json.payload;\nconst store = $getWorkflowStaticData('global');\nstore.seen = store.seen || [];\nconst duplicate = store.seen.includes(p.eventId);\nif (!duplicate) store.seen = [...store.seen.slice(-499), p.eventId];\n\nconst subjects = {\n  'request.created': p.counterpartFirstName + ' wants to borrow your ' + p.loan.toolName,\n  'request.cancelled': p.counterpartFirstName + ' cancelled their request for your ' + p.loan.toolName,\n  'request.approved': 'Your request for the ' + p.loan.toolName + ' was approved',\n  'request.declined': 'Your request for the ' + p.loan.toolName + ' was declined',\n  'request.auto_declined': 'The ' + p.loan.toolName + ' was booked by someone else for those dates',\n  'request.cancelled_listing_removed': 'The ' + p.loan.toolName + ' is no longer listed',\n  'loan.returned': p.counterpartFirstName + ' marked the ' + p.loan.toolName + ' as returned',\n};\n// Only the fields the notifier needs; nothing else is carried forward.\nreturn [{ json: {\n  eventId: p.eventId,\n  duplicate,\n  to: p.recipient.email,\n  firstName: p.recipient.firstName,\n  subject: subjects[p.event] || ('LendLoop update: ' + p.event),\n  dates: p.loan.startDate + ' → ' + p.loan.endDate,\n} }];\n"
+      }
+    },
+    {
+      "id": "notify-send",
+      "name": "Send notification (mock: log)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Mock channel: a structured log line instead of a real email/SMS.\n// Swap this node for Send Email / Slack / Twilio in production.\nconst n = $input.first().json;\nif (n.duplicate) {\n  console.log('[lendloop] duplicate event ' + n.eventId + ' ignored');\n} else if (!n.to) {\n  console.log('[lendloop] no email on file for recipient of ' + n.eventId);\n} else {\n  const masked = n.to.replace(/^(.).*(@.*)$/, '$1***$2');\n  console.log('[lendloop] NOTIFY to=' + masked + ' subject=\"' + n.subject + '\" dates=' + n.dates + ' event=' + n.eventId);\n}\nreturn [{ json: { received: true, eventId: n.eventId, duplicate: n.duplicate } }];\n"
+      }
+    },
+    {
+      "id": "notify-ok",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        -100
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "notify-reject",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        120
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"error\": \"invalid_signature\" } }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Convex webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify HMAC signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify HMAC signature": {
+      "main": [
+        [
+          {
+            "node": "Signature valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature valid?": {
+      "main": [
+        [
+          {
+            "node": "Build notification (dedupe by eventId)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build notification (dedupe by eventId)": {
+      "main": [
+        [
+          {
+            "node": "Send notification (mock: log)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send notification (mock: log)": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": []
+}

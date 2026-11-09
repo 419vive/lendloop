@@ -1,0 +1,108 @@
+{
+  "id": "LLErrorHandler01",
+  "name": "LendLoop – Error handler",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "nodes": [
+    {
+      "id": "error-trigger",
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "error-report-sign",
+      "name": "Sign: Report error to Convex",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const crypto = require('crypto');\nconst MAX_SKEW_SECONDS = 300;\nfunction requireSecret(name) {\n  const value = $env[name];\n  if (!value || value.length < 32) throw new Error(name + ' is missing or shorter than 32 chars');\n  return value;\n}\n// v1 = hex(HMAC_SHA256(secret, timestamp + \".\" + rawBody)) — same as convex/lib/hmac.ts\nfunction sign(secret, rawBody) {\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const hex = crypto.createHmac('sha256', secret).update(timestamp + '.' + rawBody).digest('hex');\n  return { timestamp, signature: 'v1=' + hex };\n}\nfunction verify(secret, rawBody, timestamp, signature) {\n  if (!timestamp || !signature) return 'missing_headers';\n  if (!/^\\d{1,12}$/.test(String(timestamp))) return 'bad_timestamp';\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > MAX_SKEW_SECONDS) return 'timestamp_skew';\n  if (!String(signature).startsWith('v1=')) return 'bad_signature_format';\n  const provided = Buffer.from(String(signature).slice(3), 'hex');\n  const expected = crypto.createHmac('sha256', secret).update(timestamp + '.' + rawBody).digest();\n  if (provided.length !== expected.length) return 'bad_signature_format';\n  return crypto.timingSafeEqual(provided, expected) ? null : 'signature_mismatch';\n}\n\nconst secret = requireSecret('N8N_TO_CONVEX_SECRET');\nconst base = $env.CONVEX_SITE_URL;\nif (!base) throw new Error('CONVEX_SITE_URL is not set');\nconst rawBody = JSON.stringify((() => {\n  const e = $input.first().json;\n  const report = {\n    workflowName: String(e.workflow?.name || 'unknown').slice(0, 120),\n    nodeName: e.execution?.lastNodeExecuted ? String(e.execution.lastNodeExecuted).slice(0, 120) : undefined,\n    message: String(e.execution?.error?.message || e.trigger?.error?.message || 'Unknown error').slice(0, 1000),\n    executionId: e.execution?.id ? String(e.execution.id) : undefined,\n  };\n  console.error('[lendloop] WORKFLOW FAILED ' + JSON.stringify(report));\n  return report;\n})());\nconst { timestamp, signature } = sign(secret, rawBody);\nconst request = { url: base.replace(/\\/$/, '') + '/n8n/workflow-error', rawBody, timestamp, signature };\nreturn [{ json: { request } }];\n"
+      }
+    },
+    {
+      "id": "error-report-http",
+      "name": "Report error to Convex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.request.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LendLoop-Timestamp",
+              "value": "={{ $json.request.timestamp }}"
+            },
+            {
+              "name": "X-LendLoop-Signature",
+              "value": "={{ $json.request.signature }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.request.rawBody }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Sign: Report error to Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign: Report error to Convex": {
+      "main": [
+        [
+          {
+            "node": "Report error to Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": []
+}
