@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p convex"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.9.25",
